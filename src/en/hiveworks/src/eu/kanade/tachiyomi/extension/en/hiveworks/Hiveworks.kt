@@ -166,14 +166,20 @@ abstract class Hiveworks : KeiSource() {
         return chapterListParse(getWithErrors(uri.toString()))
     }
 
-    private fun chapterListParse(response: Response): List<SChapter> {
+    private suspend fun chapterListParse(response: Response): List<SChapter> {
         val url = response.request.url.toString()
         when {
             "witchycomic" in url -> return witchyChapterListParse(response)
             "sssscomic" in url -> return ssssChapterListParse(response)
             "awkwardzombie" in url -> return awkwardzombieChapterListParse(response)
+            "johnnywander" in url -> return johnnywanderChapterListParse(response)
         }
         val document = response.asJsoup()
+        // johnnywander-family archives have no chapter dropdown; detect them by their
+        // storyline selector as a fallback for entries whose stored URL doesn't match.
+        if (document.selectFirst("select[name=monthselect] option[value^=storyline-]") != null) {
+            return johnnywanderChapterListParse(response)
+        }
         val baseUrl = document.select("div script").html().substringAfter("href='").substringBefore("'")
         val elements = document.select(CHAPTER_LIST_SELECTOR)
         if (elements.isNullOrEmpty()) throw Exception("This comic has a unsupported chapter list")
@@ -306,6 +312,53 @@ abstract class Hiveworks : KeiSource() {
         return chapters
     }
 
+    // Gets the chapter list for johnnywander.com, home of Barbarous.
+    // Its archive has no chapter dropdown; entries are thumbnail links split across
+    // "storyline" sub-archives, so collect every Barbarous storyline and follow
+    // each one's pagination.
+    private suspend fun johnnywanderChapterListParse(response: Response): List<SChapter> {
+        val archiveUrl = response.request.url.newBuilder()
+            .query(null)
+            .fragment(null)
+            .build()
+            .toString()
+            .removeSuffix("/")
+        val storylines = response.asJsoup()
+            .select("select[name=monthselect] option")
+            .filter { it.attr("value").startsWith("storyline-") }
+            .filter { it.text().contains("barbarous", ignoreCase = true) }
+            .map { it.attr("value") }
+        if (storylines.isEmpty()) throw Exception("This comic has a unsupported chapter list")
+
+        val chapters = mutableListOf<SChapter>()
+        // Date upload isn't available on the archive pages; like the witchy parser,
+        // use system time as a workaround to ensure notifications work.
+        val uploadDate = System.currentTimeMillis()
+        for (storyline in storylines) {
+            var page = 1
+            while (page <= MAX_ARCHIVE_PAGES) {
+                val pageUrl = if (page == 1) "$archiveUrl/$storyline" else "$archiveUrl/$storyline/$page"
+                val entries = client.get(pageUrl).asJsoup().select("div.cc-searchbox a")
+                if (entries.isEmpty()) break
+                entries.forEach { element ->
+                    val href = element.attr("abs:href")
+                    chapters.add(
+                        SChapter.create().apply {
+                            url = href
+                            name = href.substringAfterLast("/").toTitleCase()
+                            date_upload = uploadDate
+                        },
+                    )
+                }
+                page++
+            }
+        }
+        chapters.reverse()
+        return chapters
+    }
+
+    private fun String.toTitleCase(): String = split("-").joinToString(" ") { it.replaceFirstChar(Char::uppercaseChar) }
+
     // Used to throw custom error codes for http codes
     private suspend fun getWithErrors(url: String): Response {
         val response = client.get(url, ensureSuccess = false)
@@ -326,5 +379,6 @@ abstract class Hiveworks : KeiSource() {
         private const val POPULAR_MANGA_SELECTOR = "div.comicblock"
         private const val SEARCH_MANGA_SELECTOR = "div.comicblock, div.originalsblock"
         private const val CHAPTER_LIST_SELECTOR = "select[name=comic] option"
+        private const val MAX_ARCHIVE_PAGES = 500
     }
 }
