@@ -142,7 +142,28 @@ abstract class RavenManga : KeiSource() {
     }
 
     override suspend fun getPageList(chapter: SChapter): List<Page> {
-        var document = client.get(baseUrl + chapter.url).asJsoup()
+        val document = client.get(baseUrl + chapter.url).asJsoup()
+
+        // The chapter page is an auto-submit form POSTing to brakeout.xyz, which 500s.
+        // The form carries a page_api URL returning the image list as JSON; use it directly.
+        val apiUrl = document.selectFirst("form#redirectForm input[name=page_api]")?.attr("value")
+            ?.takeIf { it.isNotBlank() }
+            ?: chapter.url.replace("/hz2/", "/api/fake/").let { "$baseUrl$it" }
+
+        try {
+            val apiResponse = client.get(apiUrl).parseAs<ChapterApiResponse>()
+            val urlImg = apiResponse.response?.pages?.urlImg?.takeIf { it.isNotBlank() }
+                ?: return emptyList()
+            val imageUrls = urlImg.parseAs<List<String>>()
+                .map { it.trim().trimEnd('\r', '\n') }
+                .filter { it.isNotBlank() }
+            if (imageUrls.isNotEmpty()) {
+                return imageUrls.mapIndexed { i, url -> Page(i, imageUrl = url) }
+            }
+        } catch (_: Exception) {
+            // Fall through to the legacy form POST below.
+        }
+
         val form = document.selectFirst("form#redirectForm[method=post]")
         if (form != null) {
             val url = form.absUrl("action")
@@ -151,7 +172,10 @@ abstract class RavenManga : KeiSource() {
             form.select("input").forEach {
                 body.add(it.attr("name"), it.attr("value"))
             }
-            document = client.post(url, headers, body.build()).asJsoup()
+            val postDocument = client.post(url, headers, body.build()).asJsoup()
+            return postDocument.select("main.contenedor-imagen > section img[src], main > img[src]").mapIndexed { i, element ->
+                Page(i, imageUrl = element.absUrl("src"))
+            }
         }
         return document.select("main.contenedor-imagen > section img[src], main > img[src]").mapIndexed { i, element ->
             Page(i, imageUrl = element.absUrl("src"))

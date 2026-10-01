@@ -16,3 +16,18 @@ class Dto(
         url = "/sr2/$slug"
     }
 }
+
+@Serializable
+class ChapterApiResponse(
+    val response: ChapterApiData? = null,
+)
+
+@Serializable
+class ChapterApiData(
+    val pages: ChapterApiPages? = null,
+)
+
+@Serializable
+class ChapterApiPages(
+    @SerialName("urlImg") val urlImg: String? = null,
+)
