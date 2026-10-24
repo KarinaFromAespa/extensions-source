@@ -157,6 +157,35 @@
         return scored.length ? scored[0].el : null;
     };
 
+    const findFirstControl = () => {
+        const inOrder = Array.from(document.querySelectorAll("a[href], button, [role='button']"));
+        const orderOf = new Map(inOrder.map((el, i) => [el, i]));
+        let lastAnchorIdx = -1;
+        for (const el of inOrder) {
+            const href = el.getAttribute("href");
+            if (href && parseChapterPath(pathOf(href))) lastAnchorIdx = orderOf.get(el);
+        }
+        const currents = inOrder.filter((el) => (orderOf.get(el) ?? -1) > lastAnchorIdx &&
+            (el.getAttribute("aria-current") === "page" || /\bis-active\b/.test(String(el.className || ""))) &&
+            /^\d{1,4}$/.test((textOf(el) || "").trim()));
+        if (!currents.length) return null;
+        const cur = currents[0];
+        const curNum = parseInt((textOf(cur) || "").trim(), 10);
+        if (!(curNum > 1)) return null;
+        let box = cur.parentElement;
+        for (let d = 0; d < 3 && box && box.tagName !== "NAV"; d++) box = box.parentElement;
+        const boxEls = Array.from((box || cur.parentElement || document)
+            .querySelectorAll("button, a[href], [role='button']"));
+        let numbered = null;
+        for (const el of boxEls) {
+            if (el.disabled || el.getAttribute("aria-disabled") === "true") continue;
+            const label = (textOf(el) || el.getAttribute("aria-label") || "").trim();
+            if (/first/i.test(label)) return el;
+            if (/^\d{1,4}$/.test(label) && parseInt(label, 10) === 1) numbered = el;
+        }
+        return numbered;
+    };
+
     const describe = (el) => el ? {
         tag: el.tagName,
         cls: String(el.className || "").slice(0, 60),
@@ -262,50 +291,68 @@
         let rounds = 0;
         let complete = false;
         let stoppedAtKnown = reachedKnown();
-        while (!stoppedAtKnown && rounds < OPTIONS.maxRounds) {
-            let control = findMoreControl(sectionRoot());
-            if (!control) control = findMoreControl(document);
-            if (!control) {
-                complete = byId.size > 0;
-                break;
+        const walkForward = async () => {
+            while (!stoppedAtKnown && rounds < OPTIONS.maxRounds) {
+                let control = findMoreControl(sectionRoot());
+                if (!control) control = findMoreControl(document);
+                if (!control) {
+                    complete = byId.size > 0;
+                    return;
+                }
+                const before = byId.size;
+                rounds++;
+                const entry = {
+                    round: rounds,
+                    control: describe(control),
+                    before,
+                    tapBridge: typeof window.__comixNativeTap === "function",
+                    total: reportedTotal(),
+                };
+                const usedTap = await activate(control, entry);
+                entry.method = usedTap ? "tap" : "click";
+                let grew = await waitFor(() => (absorb(), byId.size > before) || null,
+                    { timeoutMs: OPTIONS.settleMs, intervalMs: OPTIONS.pollMs });
+                if (!grew && !reachedKnown()) {
+                    await activate(control, null);
+                    grew = await waitFor(() => (absorb(), byId.size > before) || null,
+                        { timeoutMs: OPTIONS.settleMs, intervalMs: OPTIONS.pollMs });
+                }
+                if (!grew && !reachedKnown()) {
+                    try { control.click(); } catch (e) {}
+                    grew = await waitFor(() => (absorb(), byId.size > before) || null,
+                        { timeoutMs: OPTIONS.settleMs, intervalMs: OPTIONS.pollMs });
+                }
+                entry.after = byId.size;
+                entry.url = location.href;
+                diag.push(entry);
+                if (reachedKnown()) {
+                    stoppedAtKnown = true;
+                    return;
+                }
+                if (!grew) {
+                    complete = byId.size > 0;
+                    return;
+                }
             }
-            const before = byId.size;
-            rounds++;
-            const entry = {
-                round: rounds,
-                control: describe(control),
-                before,
-                tapBridge: typeof window.__comixNativeTap === "function",
-                total: reportedTotal(),
-            };
-            const usedTap = await activate(control, entry);
-            entry.method = usedTap ? "tap" : "click";
-            let grew = await waitFor(() => (absorb(), byId.size > before) || null,
+        };
+        await walkForward();
+        let total = reportedTotal();
+        let passes = 0;
+        while (!stoppedAtKnown && total != null && byId.size < total && passes < 3) {
+            const first = findFirstControl();
+            if (!first) break;
+            passes++;
+            const entry = { round: "recheck-" + passes, control: describe(first), before: byId.size, total };
+            await activate(first, null);
+            await waitFor(() => (absorb(), byId.size > entry.before) || null,
                 { timeoutMs: OPTIONS.settleMs, intervalMs: OPTIONS.pollMs });
-            if (!grew && !reachedKnown()) {
-                await activate(control, null);
-                grew = await waitFor(() => (absorb(), byId.size > before) || null,
-                    { timeoutMs: OPTIONS.settleMs, intervalMs: OPTIONS.pollMs });
-            }
-            if (!grew && !reachedKnown()) {
-                try { control.click(); } catch (e) {}
-                grew = await waitFor(() => (absorb(), byId.size > before) || null,
-                    { timeoutMs: OPTIONS.settleMs, intervalMs: OPTIONS.pollMs });
-            }
+            absorb();
             entry.after = byId.size;
-            entry.url = location.href;
             diag.push(entry);
-            if (reachedKnown()) {
-                stoppedAtKnown = true;
-                break;
-            }
-            if (!grew) {
-                complete = byId.size > 0;
-                break;
-            }
+            if (byId.size >= total) break;
+            await walkForward();
+            total = reportedTotal();
         }
-
-        const total = reportedTotal();
         if (total != null && byId.size < total && !stoppedAtKnown) complete = false;
         const chapters = Array.from(byId.values())
             .sort((a, b) => (b.number - a.number) || (b.id - a.id));

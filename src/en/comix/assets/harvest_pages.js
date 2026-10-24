@@ -15,15 +15,16 @@
     const waitForStable = async (probe, { timeoutMs = 30000, intervalMs = 300, stableRounds = 2 } = {}) => {
         const deadline = Date.now() + timeoutMs;
         let lastSignature = null;
-        let stable = 0;
+        let stableSince = null;
         let value = null;
         while (Date.now() < deadline) {
             value = probe();
             const signature = JSON.stringify(value);
             if (signature === lastSignature) {
-                if (++stable >= stableRounds) return value;
+                if (stableSince == null) stableSince = Date.now();
+                if (Date.now() - stableSince >= stableRounds * intervalMs) return value;
             } else {
-                stable = 0;
+                stableSince = null;
                 lastSignature = signature;
             }
             await sleep(intervalMs);
@@ -86,11 +87,24 @@
         for (const img of Array.from(document.querySelectorAll("img"))) {
             const src = imageSrc(img);
             if (!src || src.startsWith("data:")) continue;
-            if (!IMAGE_EXT.test(pathOf(src))) continue;
-            if (NON_CONTENT.test(src)) continue;
-
-            const w = img.naturalWidth || img.width || 0;
-            const h = img.naturalHeight || img.height || 0;
+            if (!/^https?:\/\//i.test(src)) continue;
+            const path = pathOf(src);
+            if (NON_CONTENT.test(path)) continue;
+            if (!IMAGE_EXT.test(path)) {
+                const last = path.split("/").pop() || "";
+                if (last.includes(".")) continue;
+            }
+            let w = img.naturalWidth || img.width || 0;
+            let h = img.naturalHeight || img.height || 0;
+            if (!w || !h) {
+                try {
+                    const rect = img.getBoundingClientRect();
+                    if (rect) {
+                        w = w || Math.round(rect.width) || 0;
+                        h = h || Math.round(rect.height) || 0;
+                    }
+                } catch (e) { }
+            }
             if (w > 0 && h > 0 && w < 200 && h < 200) continue;
             if (!urls.includes(src)) urls.push(src);
         }
@@ -99,6 +113,14 @@
 
     const nudgeScroll = () => {
         try { window.scrollBy(0, Math.floor((window.innerHeight || 600) * 0.8)); } catch (e) {  }
+        try {
+            let best = null;
+            for (const el of Array.from(document.querySelectorAll("div, main, section, article"))) {
+                if (el.clientHeight > 0 && el.scrollHeight > el.clientHeight * 1.5 &&
+                    (!best || el.scrollHeight > best.scrollHeight)) best = el;
+            }
+            if (best) best.scrollTop += Math.floor((best.clientHeight || 600) * 0.8);
+        } catch (e) {  }
     };
 
     const harvest = async () => {
@@ -120,8 +142,14 @@
             images = collect();
         }
         if (images.length) {
-            images = await waitForStable(() => { nudgeScroll(); return collect(); },
-                { timeoutMs: Math.min(OPTIONS.timeoutMs, 10000), intervalMs: OPTIONS.pollMs, stableRounds: OPTIONS.stableRounds }) || images;
+            const seen = [...images];
+            const probe = () => {
+                nudgeScroll();
+                for (const url of collect()) if (!seen.includes(url)) seen.push(url);
+                return seen;
+            };
+            images = await waitForStable(probe,
+                { timeoutMs: OPTIONS.timeoutMs, intervalMs: OPTIONS.pollMs, stableRounds: OPTIONS.stableRounds }) || seen;
         }
 
         return {
